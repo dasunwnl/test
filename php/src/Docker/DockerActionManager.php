@@ -210,25 +210,9 @@ class DockerActionManager
     }
 
     public function CreateContainer(Container $container) : void {
-        $volumes = [];
-        foreach($container->GetVolumes()->GetVolumes() as $volume) {
-            $volumeEntry = $volume->name . ':' . $volume->mountPoint;
-            if($volume->isWritable) {
-                $volumeEntry = $volumeEntry . ':' . 'rw';
-            } else {
-                $volumeEntry = $volumeEntry . ':' . 'ro';
-            }
-
-            $volumes[] = $volumeEntry;
-        }
-
         $requestBody = [
             'Image' => $this->BuildImageName($container),
         ];
-
-        if(count($volumes) > 0) {
-            $requestBody['HostConfig']['Binds'] = $volumes;
-        }
 
         foreach($container->GetSecrets() as $secret) {
             $this->configurationManager->GetAndGenerateSecret($secret);
@@ -425,10 +409,18 @@ class DockerActionManager
             $requestBody['HostConfig']['SecurityOpt'] = ["apparmor:unconfined"];
         }
 
+        $mounts = [];
+        foreach($container->GetVolumes()->GetVolumes() as $volume) {
+            if (!str_starts_with($volume->name, '/')) {
+                $mounts[] = ["Type" => "volume", "Source" => $volume->name, "Target" => $volume->mountPoint, "ReadOnly" => !$volume->isWritable];
+            } else {
+                $mounts[] = ["Type" => "bind", "Source" => $volume->name, "Target" => $volume->mountPoint, "ReadOnly" => !$volume->isWritable, "Propagation" => "rshared"];
+            }
+        }
+
         // Special things for the backup container which should not be exposed in the containers.json
         if ($container->GetIdentifier() === 'nextcloud-aio-borgbackup') {
             // Additional backup directories
-            $mounts = [];
             foreach ($this->getAllBackupVolumes() as $additionalBackupVolumes) {
                 if ($additionalBackupVolumes !== '') {
                     $mounts[] = ["Type" => "volume", "Source" => $additionalBackupVolumes, "Target" => "/nextcloud_aio_volumes/" . $additionalBackupVolumes, "ReadOnly" => false];
@@ -443,13 +435,14 @@ class DockerActionManager
                     }
                 }
             }
-            if(count($mounts) > 0) {
-                $requestBody['HostConfig']['Mounts'] = $mounts;
-            }
         // Special things for the talk container which should not be exposed in the containers.json
         } elseif ($container->GetIdentifier() === 'nextcloud-aio-talk') {
             // This is needed due to a bug in libwebsockets which cannot handle unlimited ulimits
             $requestBody['HostConfig']['Ulimits'] = [["Name" => "nofile", "Hard" => 200000, "Soft" => 200000]];
+        }
+
+        if(count($mounts) > 0) {
+            $requestBody['HostConfig']['Mounts'] = $mounts;
         }
 
         $url = $this->BuildApiUrl('containers/create?name=' . $container->GetIdentifier());
